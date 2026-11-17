@@ -142,6 +142,59 @@ try {
  assert.equal(await owner.evaluate(()=>document.activeElement.dataset.screen),'history');
  await owner.locator('[data-decision="'+imported+'"]').click();
  await owner.getByText(secret,{exact:true}).waitFor();
+
+ // An edit made after the form is opened must be preserved when the stale form submits.
+ const decisionPath=ws+'/decisions/'+imported;
+ const beforeEdit=await (await get(owner,decisionPath)).json();
+ await owner.locator('#edit').click();
+ const editForm=owner.locator('#decision-form');
+ await editForm.locator('[name=title]').fill('عنوان محلی آزمایشی');
+ const {csrf}=await (await get(owner,'/bff/session')).json();
+ const concurrentEdit=await owner.request.put(origin+decisionPath,{
+  headers:{Origin:origin,'X-CSRF-Token':csrf},
+  data:{title:'عنوان ثبت‌شدهٔ هم‌زمان',decision:beforeEdit.decision,objective:beforeEdit.objective,
+   context:beforeEdit.context,source_notes:beforeEdit.source_notes,mode:beforeEdit.mode,expected_revision:beforeEdit.revision}
+ });
+ assert.equal(concurrentEdit.status(),200);
+ const save=editForm.locator('[type=submit]');
+ const [editResponse]=await Promise.all([
+  owner.waitForResponse(response=>response.url()===origin+decisionPath&&response.request().method()==='PUT'),
+  save.click()
+ ]);
+ assert.equal(editResponse.status(),409);
+ assert.equal((await editResponse.json()).error,'REVISION_CONFLICT');
+ assert.equal(editResponse.request().postDataJSON().expected_revision,beforeEdit.revision);
+ await owner.locator('#toast').filter({hasText:'این تصمیم در جای دیگه تغییر کرده؛ اطلاعات رو تازه‌سازی کن.'}).waitFor();
+ assert.equal(await editForm.locator('[name=title]').inputValue(),'عنوان محلی آزمایشی');
+ assert.equal(await save.isEnabled(),true);
+ const committed=await (await get(owner,decisionPath)).json();
+ assert.equal(committed.title,'عنوان ثبت‌شدهٔ هم‌زمان');
+ assert.equal(committed.revision,beforeEdit.revision+1);
+ report('browser_revision_conflict',{status:409,staleFormRetained:true,concurrentEditPreserved:true});
+
+ // The Kotlin fixture has already spent the single pilot attempt in this workspace.
+ await nav(owner,'history').click();
+ await owner.locator('[data-decision="'+imported+'"]').click();
+ const quotaState=async()=> (await db.query(
+  `SELECT (SELECT count(*)::int FROM runs WHERE workspace_id=$1) AS runs,
+   (SELECT coalesce(sum(attempts),0)::int FROM workspace_pilot_usage WHERE workspace_id=$1) AS pilot_attempts,
+   (SELECT coalesce(sum(attempts),0)::int FROM usage_counters WHERE workspace_id=$1) AS daily_attempts`,[workspace])).rows[0];
+ const exhausted=await quotaState();
+ assert.equal(exhausted.pilot_attempts,1);
+ const analyze=owner.locator('#analyze');
+ const [quotaResponse]=await Promise.all([
+  owner.waitForResponse(response=>response.url()===origin+decisionPath+'/runs'&&response.request().method()==='POST'),
+  analyze.click()
+ ]);
+ assert.equal(quotaResponse.status(),429);
+ assert.equal((await quotaResponse.json()).error,'PILOT_LIMIT_REACHED');
+ assert.equal(quotaResponse.request().postDataJSON().expected_revision,committed.revision);
+ assert.ok((await quotaResponse.request().allHeaders())['idempotency-key']);
+ await owner.locator('#toast').filter({hasText:'سهمیهٔ ماهانهٔ پایلوت این فضا تکمیل شده است.'}).waitFor();
+ await owner.locator('#run-panel').getByText('هنوز اجرایی انتخاب نشده.',{exact:false}).waitFor();
+ assert.equal(await analyze.isEnabled(),true);
+ assert.deepEqual(await quotaState(),exhausted);
+ report('browser_pilot_limit',{status:429,pilotAttempts:1,noRunOrUsageInserted:true});
  assert.equal(await nav(support,'incidents').count(),1);assert.equal(await nav(admin,'incidents').count(),0);
  assert.equal((await get(outside,ws+'/decisions/'+imported)).status(),404);
  const denied=await get(support,ws+'/decisions/'+imported);

@@ -896,6 +896,7 @@ class ApiIntegrationTest {
         store.setMember("alice", workspace.id, "admin", Role.ADMIN, true)
         store.createWorkspace("outside", "Second tenant")
         val decision = draft()
+        publishPilotEntitlement(workspace.id, 1, 1)
         val run = store.enqueue("alice", workspace.id, decision.id, 1, "browser-synthetic-receipt")
         store.cancel("alice", workspace.id, run.id)
         store.recordConfirmedCost("alice", workspace.id, run.id, 1250, "synthetic-receipt")
